@@ -1,0 +1,240 @@
+#define _XOPEN_SOURCE 500 /* Enable certain library functions (strdup) on linux.  See feature_test_macros(7) */
+ 
+#include <stdlib.h>
+#include <stdio.h>
+#include <limits.h>
+#include <string.h>
+
+struct inode {
+    short type;			/* file type (e.g., directory or regular) */
+    short nlink;		/* number of hard links to inode */
+    int   size;			/* file size in bytes */
+    int   direct[16];	/* block numbers for 1st 13 blocks */
+    int   indirect;		/* block number of indirect block */
+};
+ 
+struct entry_s {
+	int key;
+	struct inode *value;
+	struct entry_s *next;
+};
+ 
+typedef struct entry_s entry_t;
+ 
+struct hashtable_s {
+	int size;
+	struct entry_s **table;	
+};
+ 
+typedef struct hashtable_s hashtable_t;
+ 
+ 
+/* Create a new hashtable. */
+hashtable_t *ht_create( int size ) {
+ 
+	hashtable_t *hashtable = NULL;
+	int i;
+ 
+	if( size < 1 ) return NULL;
+ 
+	/* Allocate the table itself. */
+	if( ( hashtable = malloc( sizeof( hashtable_t ) ) ) == NULL ) {
+		return NULL;
+	}
+ 
+	/* Allocate pointers to the head nodes. */
+	if( ( hashtable->table = malloc( sizeof( entry_t * ) * size ) ) == NULL ) {
+		return NULL;
+	}
+	for( i = 0; i < size; i++ ) {
+		hashtable->table[i] = NULL;
+	}
+ 
+	hashtable->size = size;
+ 
+	return hashtable;	
+}
+ 
+/* Hash a string for a particular hash table. */
+int ht_hash( hashtable_t *hashtable, int key) {
+ 
+	return key % hashtable->size;
+}
+ 
+/* Create a key-value pair. */
+entry_t *ht_newpair( int key, struct inode *value ) {
+
+	entry_t *newpair;
+ 
+	if( ( newpair = malloc( sizeof( entry_t ) ) ) == NULL ) {
+		return NULL;
+	}
+ 
+	newpair->key = key;
+
+ 	//memcpy(newpair->value, value, sizeof(struct inode));
+	newpair->value = value;
+	if( newpair->value == NULL ) {
+		return NULL;
+	}
+ 
+	newpair->next = NULL;
+ 
+	return newpair;
+}
+ 
+/* Insert a key-value pair into a hash table. */
+void ht_set( hashtable_t *hashtable, int key, struct inode *value ) {
+
+	int bin = 0;
+	entry_t *newpair = NULL;
+	entry_t *next = NULL;
+	entry_t *last = NULL;
+ 
+	bin = ht_hash( hashtable, key );
+ 
+	next = hashtable->table[ bin ];
+ 
+	while( next != NULL && next->key != NULL &&  key > next->key ) {
+		last = next;
+		next = next->next;
+	}
+ 
+	/* There's already a pair.  Let's replace that string. */
+	if( next != NULL && next->key != NULL && key == next->key) {
+ 
+		free( next->value );
+		// next->value = (struct inode *)malloc(sizeof(struct inode));
+		// memcpy(next->value, value, sizeof(struct inode));
+		next->value = value;
+ 
+	/* Nope, could't find it.  Time to grow a pair. */
+	} else {
+		newpair = ht_newpair( key, value);
+ 
+		/* We're at the start of the linked list in this bin. */
+		if( next == hashtable->table[ bin ] ) {
+			newpair->next = next;
+			hashtable->table[ bin ] = newpair;
+	
+		/* We're at the end of the linked list in this bin. */
+		} else if ( next == NULL ) {
+			last->next = newpair;
+	
+		/* We're in the middle of the list. */
+		} else  {
+			newpair->next = next;
+			last->next = newpair;
+		}
+	}
+}
+
+/* Delete a key-value pair from a hash table.*/
+void ht_delete(hashtable_t *hashtable, int key)
+{
+	/* Judge if the key is in hashtable, if not, do nothing; if exsits, delete it.*/
+	int bin = 0;
+	entry_t *pre = NULL;
+	entry_t *cur = NULL;
+
+	bin = ht_hash( hashtable, key );
+ 
+	pre = hashtable->table[ bin -1];
+	cur = hashtable->table[ bin ];
+
+	while( cur != NULL && cur->key != NULL &&  key > cur->key ) {
+			pre = cur;
+			cur = cur->next;
+		/* Nope, could't find it.  Time to grow a pair. */
+		/* do nothing.*/
+	}
+
+	/* There's already a pair.  Let's replace that string. */
+		if( cur != NULL && cur->key != NULL && key == cur->key) {
+			printf("pre->key: %d\n", pre->key);
+ 			printf("key: %d \n", key);
+			printf("cur->key: %d\n", cur->key);
+			pre = cur->next;
+			printf("reach here1.\n");
+			free( cur );
+			printf("reach here2.\n");
+			if(pre == NULL || pre->next == NULL)
+			{
+				printf("pre next is null.\n");
+			}
+			else
+			{
+				cur = pre->next;
+			}
+			printf("reach here3.\n");
+			printf("Deleted! \n");
+		}
+
+}
+ 
+/* Retrieve a key-value pair from a hash table. */
+struct inode *ht_get( hashtable_t *hashtable, int key) {
+
+
+	int bin = 0;
+	entry_t *pair;
+ 
+	bin = ht_hash( hashtable, key );
+ 
+	/* Step through the bin, looking for our value. */
+	pair = hashtable->table[ bin ];
+	while( pair != NULL && pair->key != NULL && key > pair->key ) {
+		pair = pair->next;
+	}
+ 
+	/* Did we actually find anything? */
+	if( pair == NULL || pair->key == NULL || key != pair->key ) {
+		return NULL;
+ 
+	} else {
+		return pair->value;
+	}
+	
+} 
+ 
+int main( int argc, char **argv ) {
+ 
+ 	printf("reach 0.");
+	hashtable_t *hashtable = ht_create( 20 );
+
+	struct inode * inode1 = (struct inode *)malloc(sizeof(struct inode));
+	inode1->size = 10;
+
+	struct inode * inode2 = (struct inode *)malloc(sizeof(struct inode));
+	inode2->size = 20;
+
+	struct inode * inode3 = (struct inode *)malloc(sizeof(struct inode));
+	inode3->size = 30;
+
+	struct inode * inode4 = (struct inode *)malloc(sizeof(struct inode));
+	inode4->size = 40;
+
+	struct inode * inode5 = (struct inode *)malloc(sizeof(struct inode));
+	inode5->size = 50;
+ 
+ 	printf("reach 1.");
+	ht_set( hashtable, 1, inode1 );
+	ht_set( hashtable, 2, inode2 );
+	ht_set( hashtable, 3, inode3 );
+	ht_set( hashtable, 4, inode4 );
+	ht_set( hashtable, 5, inode5 );
+
+	printf("reach 2.");
+ 	//struct inode * inode5 = (struct inode *)malloc(sizeof(struct inode));
+	
+	printf( "%d\n", ht_get( hashtable, 1)->size );
+	printf( "%d\n", ht_get( hashtable, 2)->size );
+	printf( "%d\n", ht_get( hashtable, 3)->size );
+	printf( "%d\n", ht_get( hashtable, 4)->size );
+	printf( "%d\n", ht_get( hashtable, 5)->size );
+
+	ht_delete(hashtable, 5);
+ 	//printf( "%d\n", ht_get( hashtable, 5)->size );
+
+	return 0;
+}
