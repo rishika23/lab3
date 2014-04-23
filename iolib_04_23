@@ -1,0 +1,553 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "iolib.h"
+// <comp421/iolib.h>
+#include <comp421/filesystem.h>
+#include<comp421/yalnix.h>
+
+/*
+
+struct my_msg{
+       int type; // 1 by default; after returning from server, if file exists, 0; if not exist -1;
+       int data2; // inode number.
+       char data3[16];
+       void *ptr;  // l->s: pathname; s->l: inode num and current position in file.
+};
+*/
+struct file_info  // this structure stores info representing an open or created file.
+{
+	int inode_num; // the file's inode number
+	int cur_position; // the current position within the file. Initialized value is 0.
+	char *fullpath; // fullpath of this file.
+	void *readbuf;  // specifies the address of the buffer in the requesting process into which to perform the read.
+	int readsize;  // the number of bytes to be read from the file.
+	void *writebuf; // specifies the address of the buffer in the requesting process into which to perform the write.
+	int writesize; //the number of bytes to be writen to the file.
+	int filesize;  // the size of the file 
+};
+
+/* Store open file's info.*/
+struct file_info * files[MAX_OPEN_FILES];  // MAX_OPEN_FILES is the maxmum number of open files at a time.
+
+/* Used to check if a file descriptor is valid. O invalide; 1 valid.*/
+int track_fd[MAX_OPEN_FILES] = { 0 }; // 
+
+/* Utils */
+void reduce_slash(char *pathname);
+void concat_path(char *rootpath, char *pathname);
+
+/* Global varables */
+int current_inode_num = ROOTINODE;
+
+
+/*
+ *  Function prototypes for YFS calls:
+ */
+
+extern int Open(char *pathname)
+{
+	/* Check if the length of pathname is legal.*/
+	if(strlen(pathname) > (MAXPATHNAMELEN - 1))
+		return ERROR;
+	/* Check if the file is open.*/
+	int i;
+	for(i = 0; i<MAX_OPEN_FILES; i++)
+	{
+		if(track_fd[i] == 1)
+		{
+			/* If this file has been open, return fd.*/
+			if(strcmp(pathname, files[i]->fullpath) == 0) 
+			{
+				return i; // 
+			}
+		}
+	}
+
+	/* Create a fixed-length buffer to contain pathname for server's using. */
+	char *path = (char *)malloc(MAXPATHNAMELEN);
+	memcpy(path, pathname, strlen(pathname));
+
+	/* Tell there's available file descriptor number.*/
+	int fd = -1;
+	for(i = 0; i<MAX_OPEN_FILES-1; i++)
+	{
+		/* find an available file descriptor number. */
+		if(track_fd[i] == 0) 
+		{
+			fd = i;
+			break;
+		}
+	}
+
+	/* No available file descriptor number.*/
+	if(fd == -1) 
+		return ERROR;
+
+	/* Process multiple slashes first */
+	reduce_slash(path);
+
+	/* Create msg to be sent to server.*/
+	struct my_msg *msg_open;
+	msg_open = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_open->type = OPEN;
+	msg_open->data2 = current_inode_num;
+	msg_open->ptr = (void *)path;
+
+	/* Get result from file system. */
+	/* if pid is positive, normal.*/
+	/* if pid is negative, it is interpreted as the process ID of the process to which to send the message.*/
+	int result = Send((void *)msg_open, -FILE_SERVER);
+	if(result == 0)
+	{
+		struct file_info file;
+		//file = malloc(sizeof(struct file_info));
+		file.inode_num = (msg_open->data2); // inode number is from server.
+		file.cur_position = 0; // be initialized as 0 when a file is open.
+		file.fullpath = path; // store the file's path
+
+		files[fd] = &file;
+		track_fd[fd] = 1; // make this file desciptor number valid.
+
+		return fd;
+	}
+	else
+		return ERROR;
+
+}
+
+extern int Close(int fd)
+{
+	/* fd is not valid*/
+	if(track_fd[fd] == 0)
+		return ERROR;
+	/* if valid */
+	else  
+	{
+		/* make it invalid.*/
+		track_fd[fd] = 0;
+		return 0;
+	}
+}
+
+extern int Create(char *pathname)
+{	int i;
+	/* Check if the length of pathname is legal.*/
+	if(strlen(pathname) > (MAXPATHNAMELEN - 1))
+		return ERROR;
+
+	/* Create a fixed-length buffer to contain pathname for server's using. */
+	char *path = (char *)malloc(MAXPATHNAMELEN);
+	memcpy(path, pathname, strlen(pathname));
+
+	/* Tell there's available file descriptor number.*/
+	int fd = -1;
+	for(i = 0; i<MAX_OPEN_FILES-1; i++)
+	{
+		/* find an available file descriptor number. */
+		if(track_fd[i] == 0) 
+		{
+			fd = i;
+			break;
+		}
+	}
+
+	/* No available file descriptor number.*/
+	if(fd == -1) 
+		return ERROR;
+
+	/* Process multiple slashes first */
+	reduce_slash(path);
+
+	/* Create msg to be sent to server.*/
+	struct my_msg *msg_create;
+	msg_create = (struct my_msg *)malloc(sizeof(struct my_msg));
+	msg_create->type = CREATE;
+	msg_create->data2 = current_inode_num;
+	msg_create->ptr = (void *)path;
+
+	/* What the server should do is to check if the named file exsits. if yes, truncate it to 0 and open an 
+	   empty file. If not, create a new file with the given name and assign it a descriptor number.*/
+
+	int result = Send((void *)msg_create, -FILE_SERVER);
+	if(result == 0)
+	{
+		struct file_info file;
+		file.inode_num = msg_create->data2; // inode number is from server.
+		file.cur_position = 0; // be initialized as 0 when a file is created.
+		file.fullpath = path; // store the file's full path.
+		file.filesize = 0;
+
+		files[fd] = &file;
+		track_fd[fd] = 1; // make this file desciptor number valid.
+		return fd;
+	}
+	else
+		return ERROR;
+
+}
+
+extern int Read(int fd, void *buf, int size)
+{
+	files[fd]->readbuf = buf;
+
+	/* Create msg to be sent to server.*/
+	struct my_msg *msg_read;
+	msg_read = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_read->type = READ;
+	msg_read->data2 = current_inode_num;
+	msg_read->ptr = files[fd]; // In read request, all info are enclosed in readfile.
+
+
+	int result = Send(msg_read, GetPid());
+
+	return result;
+}
+
+extern int Write(int fd, void *buf, int size)
+{
+	files[fd]->writebuf = buf;
+
+	/* Create msg to be sent to server. */
+	struct my_msg *msg_write;
+	msg_write = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_write->type = WRITE;
+	msg_write->data2 = current_inode_num;
+	msg_write->ptr = (void *)files[fd];
+
+	int result = Send((void *)msg_write, -FILE_SERVER); 
+	/* Reset the file size. */
+	(*(struct file_info *)files[fd]).filesize = (*(struct file_info *)msg_write->ptr).filesize;
+
+	return result;
+}
+
+extern int Seek(int fd, int offset, int whence)
+{
+	switch(whence)
+	{
+		case SEEK_SET:
+			if(offset < 0)
+				return ERROR;
+			files[fd]->cur_position = offset;
+			return files[fd]->cur_position;
+		break;
+		case SEEK_CUR:
+			files[fd]->cur_position += offset;
+			if((files[fd]->cur_position+offset) < 0 || (files[fd]->cur_position+offset) > files[fd]->filesize)
+				return ERROR;
+			else
+				files[fd]->cur_position += offset;
+			return files[fd]->cur_position;
+		break;
+		case SEEK_END:
+			if(offset > 0)
+				return ERROR;
+			else
+				files[fd]->cur_position += offset;
+			return files[fd]->cur_position;
+		break;
+	}
+
+}
+
+extern int Link(char *oldname, char *newname)
+{
+	if(strlen(oldname) > (MAXPATHNAMELEN-1) || strlen(newname) > (MAXPATHNAMELEN-1))
+		return ERROR;
+
+	/* Process multiple slashes first */
+	reduce_slash(oldname);
+	reduce_slash(newname);
+
+	struct old_new *name;
+	name = (struct old_new *)malloc(sizeof(struct old_new));
+
+	memcpy(name->oldname, oldname, strlen(oldname));
+	memcpy(name->newname, newname, strlen(newname));
+
+	/* Create msg to be sent to server.*/
+	struct my_msg *msg_link;
+	msg_link = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_link->type = LINK;
+	msg_link->data2 = current_inode_num;
+	msg_link->ptr = name;
+
+	int result = Send((void *)msg_link, -FILE_SERVER);
+
+	return result;
+}
+
+extern int Unlink(char *pathname)
+{
+	if(strlen(pathname) > (MAXPATHNAMELEN-1))
+		return ERROR;
+
+	/* Process multiple slashes first */
+	reduce_slash(pathname);
+
+	/* Create a buffer for server's using. */
+	char path[MAXPATHNAMELEN];
+	memcpy(path, pathname, strlen(pathname));
+
+	/* Create msg to be sent to server.*/
+	struct my_msg *msg_unlink;
+	msg_unlink = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_unlink->type = UNLINK;
+	msg_unlink->data2 = current_inode_num;
+	msg_unlink->ptr = path;
+
+	int result = Send((void *)msg_unlink, -FILE_SERVER);
+
+	return result;
+
+}
+
+extern int SymLink(char *oldname, char *newname)
+{
+	struct old_new *name;
+	name = (struct old_new *)malloc(sizeof(struct old_new));
+
+	memcpy(name->oldname, oldname, strlen(oldname));
+	memcpy(name->newname, newname, strlen(newname));
+
+	/* Create msg to be sent to server.*/
+	struct my_msg *msg_symlink;
+	msg_symlink = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_symlink->type = SYMLINK;
+	msg_symlink->data2 = current_inode_num;
+	msg_symlink->ptr = name;
+
+	int result = Send((void *)msg_symlink, -FILE_SERVER);
+
+	return result;
+}
+
+extern int ReadLink(char *pathname, char *buf, int len)
+{
+	if(strlen(pathname) > (MAXPATHNAMELEN-1))
+		return ERROR;
+
+	/* Create a fixed-size buffer for server's using. */
+	char path[MAXPATHNAMELEN];
+	memcpy(path, pathname, strlen(pathname));
+
+	struct readlink *new_read_link;
+	new_read_link = (struct readlink *)malloc(sizeof(struct readlink));
+
+	strcpy(new_read_link->pathname, path);
+	new_read_link->buf = buf;
+	new_read_link->len = len;
+
+	/* Create msg to be sent to server.*/
+	struct my_msg *msg_readlink;
+	msg_readlink = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_readlink->type = READLINK;
+	msg_readlink->data2 = current_inode_num;
+	msg_readlink->ptr = new_read_link;
+
+	int result = Send((void *)msg_readlink, -FILE_SERVER);
+
+	return result;
+
+}
+
+extern int MkDir(char *pathname)
+{
+	if(strlen(pathname) > (MAXPATHNAMELEN-1))
+		return ERROR;
+
+	/* Create a fixed-size buffer for server's using. */
+	char path[MAXPATHNAMELEN];
+	memcpy(path, pathname, strlen(pathname));
+
+	/* Create msg to be sent to server.*/
+	struct my_msg *msg_mkdir;
+	msg_mkdir = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_mkdir->type = MKDIR;
+	msg_mkdir->data2 = current_inode_num;
+	msg_mkdir->ptr = path;
+
+	int result = Send((void *)msg_mkdir, -FILE_SERVER);
+
+	return result;
+}
+
+extern int RmDir(char *pathname)
+{
+	if(strlen(pathname) > (MAXPATHNAMELEN-1))
+		return ERROR;
+
+	/* Create a fixed-size buffer for server's using. */
+	char path[MAXPATHNAMELEN];
+	memcpy(path, pathname, strlen(pathname));
+
+	/* Create msg to be sent to server. */
+	struct my_msg *msg_rmdir;
+	msg_rmdir = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_rmdir->type = RMDIR;
+	msg_rmdir->data2 = current_inode_num;
+	msg_rmdir->ptr = path;
+
+	int result = Send((void *)msg_rmdir, -FILE_SERVER);
+	return result;
+}
+
+extern int ChDir(char *pathname)
+{
+	if(strlen(pathname) > (MAXPATHNAMELEN-1))
+		return ERROR;
+
+	/* Create a fixed-size buffer for server's using. */
+	char path[MAXPATHNAMELEN];
+	memcpy(path, pathname, strlen(pathname));
+
+	/* The file pathname must be a directory. Send a msg to server to check if the pathname is valid.*/
+	struct my_msg *msg_chdir;
+	msg_chdir = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_chdir->type = CHDIR;
+	msg_chdir->data2 = current_inode_num;
+	msg_chdir->ptr = (void *)path;
+
+	/* Result from file system. */
+	int result = Send((void *)msg_chdir, -FILE_SERVER);
+
+	if(result == 0)
+	{
+		//rootpath = path;
+		current_inode_num = msg_chdir->data2;
+		return 0;
+	}
+	else
+		return ERROR;
+}
+
+extern int Stat(char *pathname, struct Stat *statbuf)
+{
+	if(strlen(pathname) > (MAXPATHNAMELEN-1))
+		return ERROR;
+
+	/* Create a fixed-size buffer for server's using. */
+	char path[MAXPATHNAMELEN];
+	memcpy(path, pathname, strlen(pathname));
+
+	struct stat_struct *stat;
+	stat = (struct stat_struct *)malloc(sizeof(struct stat_struct));
+
+	stat->statbuf = statbuf;
+	strcpy(stat->pathname , path);
+
+	/* Create msg sent to file server. */
+	struct my_msg *msg_stat;
+	msg_stat = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_stat->type = STAT;
+	msg_stat->data2 = current_inode_num;
+	msg_stat->ptr = stat;
+
+	int result = Send((void *)msg_stat, -FILE_SERVER);
+	return result;
+}
+
+extern int Sync(void)
+{
+	/* Create msg sent to file server. */
+	struct my_msg *msg_sync;
+	msg_sync = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_sync->type = SYNC;
+
+	int result = Send((void *)msg_sync, -FILE_SERVER);
+	if(result == 0)
+	{
+
+	}
+	else
+		return ERROR;
+}
+
+extern int Shutdown(void)
+{
+	/* Create msg sent to file server.*/
+	struct my_msg *msg_shutdown;
+	msg_shutdown = (struct my_msg *) malloc(sizeof(struct my_msg));
+
+	msg_shutdown->type = SHUTDOWN;
+
+	int result = Send((void *)msg_shutdown, -FILE_SERVER);
+
+	return result;
+}
+
+/* Utils */
+void reduce_slash(char *pathname)
+{
+
+	if (pathname == NULL)
+		return;  // the path is empty
+
+	/* if path is not null */
+	char *temp = pathname;
+	char path[256] = "";
+	char pre_char = *temp;
+	char cur_char = *temp;
+	int counter = 0;
+	path[counter] = cur_char;
+	printf("%c \n",cur_char);
+	temp++;
+	while(*temp != '\0')
+	{
+		cur_char = *temp;
+		temp++;
+
+		if(pre_char == '/' && cur_char == '/')
+		{
+			/* do nothing. */
+		}
+		else
+		{
+			pre_char = cur_char;
+			printf("%c \n",cur_char);
+			counter++;
+			path[counter] = cur_char;
+		}
+	}
+	path[counter] = cur_char;
+
+	/* If the path is ended with "/", add a "."*/
+	if(cur_char == '/')
+	{
+		counter++;
+		path[counter] = cur_char;
+	}
+	counter++;
+	path[counter] = '\0';
+
+	memcpy(pathname, path, counter+1);
+}
+
+/* Get absolute path if given relative path. Result is still in pathname.*/
+void concat_path(char *rootpath, char *pathname)
+{
+	size_t len1 = strlen(rootpath);
+	size_t len2 = strlen(pathname);
+
+	char *fullpath = malloc(len1 + len2 + 1);
+
+	memcpy(fullpath, rootpath, len1);
+	memcpy(fullpath+len1, pathname, len2+1);
+	memcpy(pathname, fullpath, strlen(fullpath)+1);
+
+	printf("%s \n", pathname);
+}
+
