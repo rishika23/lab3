@@ -1,0 +1,758 @@
+ 
+#include <stdlib.h>
+#include <stdio.h>
+#include <limits.h>
+#include <string.h>
+//#include <comp421/hardware.h>
+
+/* Tag of each block in cache.*/
+#define DIRTY 0
+#define CLEAN 1
+#define BLOCKSIZE 57 // to be deleted.
+
+struct inode {
+    short type;			/* file type (e.g., directory or regular) */
+    short nlink;		/* number of hard links to inode */
+    int   size;			/* file size in bytes */
+    int   direct[16];	/* block numbers for 1st 13 blocks */
+    int   indirect;		/* block number of indirect block */
+};
+ 
+ /* the node in inode cache */
+struct entry_s {
+	int tag;  // 0 dirty; 1 clean
+	int key;
+	struct inode value;
+	struct entry_s *next;
+	struct entry_s *lru_next;
+};
+typedef struct entry_s entry_t;
+
+/* the node in block cache */
+struct _b_node {
+	int tag; // 0 dirty; 1 clean
+	int key;
+	char data[BLOCKSIZE]; // BLOCKSIZE defined in filesystem.h
+	struct _b_node *next;
+	struct _b_node *lru_next;
+};
+typedef struct _b_node b_node;
+
+/* Hashtable bucket for inode cache. */
+struct hashtable_s {
+	int size; // size of the cache
+	int counter; // tell if the hash table is full.
+	entry_t **table;	
+	entry_t *lru_head;
+	//struct entry_s *lru_tail;
+}; 
+typedef struct hashtable_s hashtable_t;
+
+/* Hashtable bucket for block cache.*/
+struct _hashtable_b 
+{
+	int size; // size of the cacahe
+	int counter; // tell if the cache is full
+	b_node **table;
+	b_node *lru_head;
+};
+typedef struct _hashtable_b hashtable_b;
+
+/* Declare functions. */
+extern hashtable_t *ht_create_inode( int size ); //create hashtable of inode cacahe;
+extern hashtable_b *ht_create_block( int size ); // create hashtable of block cache.
+
+int ht_hash( hashtable_t *hashtable, int key); // not for extern use.
+int ht_hash_b(hashtable_b *hashtable, int key); // not for extern use.
+
+entry_t *ht_newpair_inode( int key, struct inode *value ); //not for extern use.
+b_node *ht_newpair_block(int key, char* data); // not for extern use.
+
+extern int ht_set_inode( hashtable_t *hashtable, int key, struct inode *value ); // if success, return 0.
+extern int ht_set_block( hashtable_b *hashtable, int key, char* data ); //if success, return 0. as including evicting, so it always success.
+
+extern int ht_get_inode( hashtable_t *hashtable, int key, struct inode * pointer); // if success, return 0; if not exist, return -1.
+extern int ht_get_block( hashtable_b *hashtable, int key, char * pointer) ; // if success, return0; if not exists, return -1.
+
+int ht_evict_inode(hashtable_t *hashtable, int key, struct inode *value); // not for extern use.
+int ht_evict_block(hashtable_b *hashtable, int key, b_node *data); // not for extern use.
+
+/* Utils */
+void updatelru_inode(entry_t **head, entry_t *node); // not for extern use.
+void updatelru_block(b_node **head, b_node *node); // not for extern use.
+
+int evict_from_lru(entry_t *head); // not for extern use.
+int evict_from_lru_b(b_node *list); // not for extern use.
+
+/* Create a new hashtable for inode cache. */
+hashtable_t *ht_create_inode( int size ) {
+ 
+	hashtable_t *hashtable = NULL;
+	int i;
+ 
+	if( size < 1 ) return NULL;
+ 
+	/* Allocate the table itself. */
+	if( ( hashtable = malloc( sizeof( hashtable_t ) ) ) == NULL ) {
+		return NULL;
+	}
+ 
+	/* Allocate pointers to the head nodes. */
+	if( ( hashtable->table = malloc( sizeof( entry_t * ) * size ) ) == NULL ) {
+		return NULL;
+	}
+	for( i = 0; i < size; i++ ) {
+		hashtable->table[i] = NULL;
+	}
+ 
+	hashtable->size = size;
+	hashtable->counter = 1;
+
+	/* initialize lru list*/
+	hashtable->lru_head = malloc(sizeof(entry_t));
+
+	return hashtable;	
+}
+ 
+/* Create a new hashtable for block cache. */
+hashtable_b *ht_create_block( int size ) {
+ 
+	hashtable_b *hashtable = NULL;
+	int i;
+ 
+	if( size < 1 ) return NULL;
+ 
+	/* Allocate the table itself. */
+	if( ( hashtable = malloc( sizeof( hashtable_b ) ) ) == NULL ) {
+		return NULL;
+	}
+ 
+	/* Allocate pointers to the head nodes. */
+	if( ( hashtable->table = malloc( sizeof( b_node * ) * size ) ) == NULL ) {
+		return NULL;
+	}
+	for( i = 0; i < size; i++ ) {
+		hashtable->table[i] = NULL;
+	}
+ 
+	hashtable->size = size;
+	hashtable->counter = 0;
+ 
+ 	/* initialize lru list*/
+	hashtable->lru_head = malloc(sizeof(b_node));
+
+	return hashtable;	
+}
+
+/* Hash a string for a particular hash table. */
+int ht_hash( hashtable_t *hashtable, int key) {
+ 	
+	return key % hashtable->size;
+}
+
+/* Hash a string for a particular hash table. */
+int ht_hash_b( hashtable_b *hashtable, int key) {
+ 	
+	return key % hashtable->size;
+}
+ 
+/* Create a key-value pair for inode cache. */
+entry_t *ht_newpair_inode( int key, struct inode *value ) {
+
+	entry_t *newpair;
+ 
+	if( ( newpair = malloc( sizeof( entry_t ) ) ) == NULL ) {
+		return NULL;
+	}
+ 
+	newpair->key = key;
+
+	if(value == NULL)
+		return NULL;
+
+	/*newpair->value = *value;*/
+	newpair->value.type = value->type;			/* file type (e.g., directory or regular) */
+    newpair->value.nlink = value->nlink;		/* number of hard links to inode */
+    newpair->value.size = value->size;			/* file size in bytes */
+    memcpy(newpair->value.direct, value->direct, 16*sizeof(int));	/* block numbers for 1st 13 blocks */
+    newpair->value.indirect = value->indirect;		/* block number of indirect block */
+ 
+	newpair->next = NULL;
+ 
+	return newpair;
+}
+
+/* Create a key-value pair for block cache. */
+b_node *ht_newpair_block(int key, char* data)
+{
+
+	b_node *newpair;
+
+	if((newpair = malloc( sizeof(b_node))) == NULL)
+	{
+		return NULL;
+	}
+
+	newpair->key = key;
+
+	if(data == NULL)
+		return NULL;
+
+	strncpy(newpair->data, data, BLOCKSIZE);
+
+	newpair->next = NULL;
+
+	return newpair;
+}
+ 
+/* Insert a key-value pair into inode table. If success, return 0; if fail, return -1. */
+int ht_set_inode( hashtable_t *hashtable, int key, struct inode *value ) {
+
+	int bin = 0;
+	entry_t *newpair = NULL;
+	entry_t *next = NULL;
+	entry_t *last = NULL;
+	int evictkey;
+
+	bin = ht_hash( hashtable, key );
+	printf("above while bin: %d\n", bin);
+	next = hashtable->table[ bin ];
+	while( next != NULL && next->key != NULL &&  key > next->key ) {
+		last = next;
+		next = next->next;
+		printf("in while key %d\n", key);
+		printf("in while next key %d\n", last->key);
+		break;
+	}
+
+	printf("out of while\n");
+
+	/* There's already a pair.  Let's replace that string. */
+	if( next != NULL && next->key != NULL && key == next->key) {
+ 
+		/* Cover the old value. next->value = value;*/
+		next->tag = DIRTY;
+		next->value.type = value->type;			
+    	next->value.nlink = value->nlink;		
+    	next->value.size = value->size;		
+    	memcpy(next->value.direct, value->direct, 16*sizeof(int));	
+    	next->value.indirect = value->indirect;	
+
+    	/* update lru list. */
+    	updatelru_inode(&hashtable->lru_head, next);
+    	
+    	return 0;
+ 
+	/* Nope, could't find it.  Time to grow a pair. */
+	} else {
+		if(hashtable->counter > hashtable->size)
+		{
+			/* store the evicted inode.*/
+			struct inode *temp;
+			temp = (struct inode *)malloc(sizeof(struct inode));			
+			evictkey = evict_from_lru(hashtable->lru_head);	
+			int result = ht_evict_inode(hashtable, evictkey, temp);
+			ht_set_inode(hashtable, key, value);
+
+			/* If nothing more need to be done, return 0. If it's dirty, return -1.*/
+			if(result == -1)
+			{
+				//memcpy(value, temp, sizeof(struct inode));
+				value->type = temp->type;			
+    			value->nlink = temp->nlink;		
+    			value->size = temp->size;		
+    			memcpy(value->direct, temp->direct, 16*sizeof(int));	
+    			value->indirect = temp->indirect;	
+
+				return -1;
+			}			
+			return 0;
+		}
+			
+		hashtable->counter++;
+		newpair = ht_newpair_inode( key, value);
+		newpair->tag = CLEAN;
+ 
+		/* We're at the start of the linked list in this bin. */
+		if( next == hashtable->table[ bin ] ) {
+			newpair->next = next;
+			hashtable->table[ bin ] = newpair;
+	
+		/* We're at the end of the linked list in this bin. */
+		} else if ( next == NULL ) {
+			last->next = newpair;
+	
+		/* We're in the middle of the list. */
+		} else  {
+			newpair->next = next;
+			last->next = newpair;
+		}
+
+		updatelru_inode(&hashtable->lru_head, newpair);
+	}
+	return 0;
+}
+
+/* Insert a key-value pair into block cache. */
+int ht_set_block( hashtable_b *hashtable, int key, char* data ) {
+
+	int bin = 0;
+	b_node *newpair = NULL;
+	b_node *next = NULL;
+	b_node *last = NULL;
+	int evictkey;
+ 
+ 	//printf("Reach 1. ht_set_block. \n");
+	bin = ht_hash_b( hashtable, key );
+	next = hashtable->table[ bin ];
+	while( next != NULL && next->key != NULL &&  key > next->key ) {
+		last = next;
+		next = next->next;
+		break;
+	}
+
+	/* There's already a pair.  Let's replace that string. */
+	if( next != NULL && next->key != NULL && key == next->key) {
+ 
+		/* Cover the old value. next->value = value;*/
+		next->tag = DIRTY;
+		strncpy(next->data, data, BLOCKSIZE);
+		updatelru_block(&hashtable->lru_head, next); 
+ 
+	/* Nope, could't find it.  Time to grow a pair. */
+	} else {
+
+		//printf("Reach 6. ht_set_block. \n");
+		if(hashtable->counter >= hashtable->size)
+		{
+			/* store evicted b_node if any.*/
+			b_node *temp;
+			temp = (b_node *)malloc(sizeof(b_node));
+
+			evictkey = evict_from_lru_b(hashtable->lru_head);
+			int result = ht_evict_block(hashtable, evictkey, temp);
+			ht_set_block(hashtable, key, data);
+
+			/* If the evicted b_node is dirty, store it and return to file system.*/
+			if(result == DIRTY)
+			{
+				memcpy(data, temp->data, BLOCKSIZE);
+				return -1;
+			}
+			return 0;
+		}
+		
+		hashtable->counter++;
+		newpair = ht_newpair_block( key, data);
+		if(key == 5)
+		{
+			printf("key is 5.\n");
+		}
+		newpair->tag = CLEAN;
+ 
+		/* We're at the start of the linked list in this bin. */
+		if( next == hashtable->table[ bin ] ) {
+			newpair->next = next;
+			hashtable->table[ bin ] = newpair;
+	
+		/* We're at the end of the linked list in this bin. */
+		} else if ( next == NULL ) {
+			last->next = newpair;
+	
+		/* We're in the middle of the list. */
+		} else  {
+			newpair->next = next;
+			last->next = newpair;
+		}
+
+		updatelru_block(&hashtable->lru_head, newpair);
+	}
+	return 0;
+}
+
+
+/* Delete a key-value pair from a hash table.*/
+int ht_evict_inode(hashtable_t *hashtable, int key, struct inode * value)
+{
+	/* Judge if the key is in hashtable, if not, do nothing; if exsits, delete it.*/
+	int bin = 0;
+	entry_t *pre = NULL;
+	entry_t *cur = NULL;
+	int evicttag = CLEAN;
+
+	bin = ht_hash( hashtable, key );
+ 
+	pre = hashtable->table[ bin -1];
+	cur = hashtable->table[ bin ];
+
+	while( cur != NULL && cur->key != NULL &&  key > cur->key ) {
+			pre = cur;
+			cur = cur->next;
+			/* do nothing.*/
+			return 0; // if hashtable doesn't contain the key, then it cannot delete it. return 0.
+	}
+		if( cur != NULL && cur->key != NULL && key == cur->key) {
+			
+			pre = cur->next;
+			if(cur->tag == DIRTY)
+			{
+				value->type = cur->value.type;			
+    			value->nlink = cur->value.nlink;		
+    			value->size = cur->value.size;		
+    			memcpy(value->direct, cur->value.direct, 16*sizeof(int));	
+    			value->indirect = cur->value.indirect;	
+
+				evicttag = DIRTY;
+			}
+			free( cur );
+			if(pre == NULL || pre->next == NULL)
+			{
+				printf("pre next is null.\n");
+			}
+			else
+			{
+				cur = pre->next;
+			}
+		}
+		hashtable->counter--;
+		return evicttag;
+
+}
+
+/* Delete a key-value pair from a hash table.*/
+int ht_evict_block(hashtable_b *hashtable, int key, b_node *data)
+{
+	/* Judge if the key is in hashtable, if not, do nothing; if exsits, delete it.*/
+	int bin = 0;
+	b_node *pre = NULL;
+	b_node *cur = NULL;
+	int evicttag = CLEAN;
+
+	bin = ht_hash_b( hashtable, key );
+ 
+	pre = hashtable->table[ bin -1];
+	cur = hashtable->table[ bin ];
+
+	while( cur != NULL && cur->key != NULL &&  key > cur->key ) {
+			pre = cur;
+			cur = cur->next;
+			/* do nothing.*/
+			return 0; // if hashtable doesn't contain the key, then it cannot delete it. return -1.
+	}
+
+		if( cur != NULL && cur->key != NULL && key == cur->key) {
+
+			
+			pre = cur->next;
+			if(cur->tag == DIRTY)
+			{
+				data->key = cur->key;
+				memcpy(data->data, cur->data, BLOCKSIZE);
+				evicttag = DIRTY;
+			}
+			free( cur );
+			if(pre == NULL || pre->next == NULL)
+			{
+				printf("pre next is null.\n");
+			}
+			else
+			{
+				cur = pre->next;
+			}
+		}
+		hashtable->counter--;
+		return evicttag;
+}
+ 
+/* Retrieve a key-value pair from inode cache. */
+int ht_get_inode( hashtable_t *hashtable, int key, struct inode * pointer) {
+
+
+	int bin = 0;
+	entry_t *pair;
+ 
+	bin = ht_hash( hashtable, key );
+ 
+	/* Step through the bin, looking for our value. */
+	pair = hashtable->table[ bin ];
+	while( pair != NULL && pair->key != NULL && key > pair->key ) {
+		pair = pair->next;
+	}
+ 
+	/* Did we actually find anything? */
+	if( pair == NULL || pair->key == NULL || key != pair->key ) {
+		return -1;
+ 
+	} else {
+		pointer->type = pair->value.type;			/* file type (e.g., directory or regular) */
+    	pointer->nlink = pair->value.nlink;		/* number of hard links to inode */
+    	pointer->size = pair->value.size;			/* file size in bytes */
+    	memcpy(pointer->direct, pair->value.direct, 16*sizeof(int));	/* block numbers for 1st 13 blocks */
+    	pointer->indirect = pair->value.indirect;		/* block number of indirect block */
+		return 0;
+	}
+	
+} 
+
+/* Retrieve a key-value pair from block cache. */
+int ht_get_block( hashtable_b *hashtable, int key, char * pointer) {
+
+	int bin = 0;
+	b_node *pair;
+ 
+	bin = ht_hash_b( hashtable, key );
+ 
+	/* Step through the bin, looking for our value. */
+	pair = hashtable->table[ bin ];
+	while( pair != NULL && pair->key != NULL && key > pair->key ) {
+		pair = pair->next;
+	}
+ 	
+	/* Did we actually find anything? */
+	if( pair == NULL || pair->key == NULL || key != pair->key ) {
+		return -1;
+ 
+	} else {
+		pointer[BLOCKSIZE] = '\0';
+		strncpy(pointer, pair->data, BLOCKSIZE);
+		return 0;
+	}
+	
+} 
+
+void updatelru_inode(entry_t **head, entry_t *node)
+{
+	/* If the list is empty, add this node and return;*/
+	if((*head)->lru_next == NULL) 
+	{
+		node->lru_next = (*head)->lru_next;
+		(*head)->lru_next = node;
+		return;
+	}
+
+	entry_t *pre;
+	entry_t *cur;
+	entry_t *temphead;
+
+	temphead = (*head)->lru_next;
+	
+	pre = temphead;
+	/* the node is the head already.*/
+	if(pre->key == node->key)  
+		return;
+
+	temphead = temphead->lru_next;
+	while(temphead != NULL && temphead != NULL)
+	{
+		cur = temphead;
+		/* find a key match. Move this node to head.*/
+		if(cur->key == node->key)
+		{
+			pre->lru_next = cur->lru_next;
+			cur->lru_next = (*head)->lru_next;
+			(*head)->lru_next = cur;
+			return;
+		}
+		pre = temphead;
+		temphead = temphead->lru_next;
+	}
+	/* if the key not exists, add it to head.*/
+	node->lru_next = (*head)->lru_next;
+	(*head)->lru_next = node;
+}
+ 
+void updatelru_block(b_node **head, b_node *node)
+{
+	/* If the list is empty, add this node and return;*/
+	if((*head)->lru_next == NULL) 
+	{
+		node->lru_next = (*head)->lru_next;
+		(*head)->lru_next = node;
+		return;
+	}
+
+	b_node *pre;
+	b_node *cur;
+	b_node *temphead;
+
+	temphead = (*head)->lru_next;
+	
+	pre = temphead;
+	/* the node is the head already.*/
+	if(pre->key == node->key)  
+		return;
+
+	temphead = temphead->lru_next;
+	while(temphead != NULL && temphead != NULL)
+	{
+		cur = temphead;
+		/* find a key match. Move this node to head.*/
+		if(cur->key == node->key)
+		{
+			pre->lru_next = cur->lru_next;
+			cur->lru_next = (*head)->lru_next;
+			(*head)->lru_next = cur;
+			return;
+		}
+		pre = temphead;
+		temphead = temphead->lru_next;
+	}
+	/* if the key not exists, add it to head.*/
+	node->lru_next = (*head)->lru_next;
+	(*head)->lru_next = node;
+}
+
+int evict_from_lru(entry_t *list)
+{
+	entry_t *templist;
+	entry_t *node;
+	entry_t *pre;
+
+	templist = list;
+	if(templist == NULL)
+		return -1;
+	
+	while(templist != NULL)
+	{
+		if(templist->lru_next == NULL)
+			break;
+		pre = templist;
+		templist = templist->lru_next;
+	}
+
+	node = templist;
+	pre->lru_next = NULL;
+	templist = NULL;
+	free(templist);
+	return node->key;
+}
+
+int evict_from_lru_b(b_node *list)
+{
+	b_node *templist;
+	b_node *node;
+	b_node *pre;
+
+	templist = list;
+	if(templist == NULL)
+		return -1;
+	
+	while(templist != NULL)
+	{
+		if(templist->lru_next == NULL)
+			break;
+		pre = templist;
+		templist = templist->lru_next;
+	}
+
+	node = templist;
+	pre->lru_next = NULL;
+	templist = NULL;
+	free(templist);
+	return node->key;
+}
+
+int main( int argc, char **argv )
+{
+	hashtable_t *hashtable = ht_create_inode( 4);
+
+	struct inode * inode1 = (struct inode *)malloc(sizeof(struct inode));
+	inode1->size = 1;
+
+	struct inode * inode2 = (struct inode *)malloc(sizeof(struct inode));
+	inode2->size = 2;
+
+	struct inode * inode3 = (struct inode *)malloc(sizeof(struct inode));
+	inode3->size = 3;
+
+	struct inode * inode4 = (struct inode *)malloc(sizeof(struct inode));
+	inode4->size = 4;
+
+	struct inode * inode5 = (struct inode *)malloc(sizeof(struct inode));
+	inode5->size = 5;
+ 
+	ht_set_inode( hashtable, 1, inode1 );
+	//printf("1>>>> >>>>  counter :  %d \n", hashtable->counter);
+	ht_set_inode( hashtable, 1, inode2 );
+	//printf("2>>>> >>>>  counter :  %d \n", hashtable->counter);
+	ht_set_inode( hashtable, 3, inode3 );
+	//printf("3>>>> >>>>  counter :  %d \n", hashtable->counter);
+	//ht_set_inode( hashtable, 4, inode4 );
+	//printf("4>>>>> >>>>  counter :  %d \n", hashtable->counter);
+
+	// ht_set_inode( hashtable, 8, inode5 );
+	// ht_set_inode( hashtable, 2, inode1 );
+	// ht_set_inode( hashtable, 1, inode1 );
+	// ht_set_inode( hashtable, 3, inode3 );
+	// ht_set_inode( hashtable, 1000, inode1 );
+
+	// printf("reach 2.");
+
+	struct inode * inode6 = (struct inode *)malloc(sizeof(struct inode));
+	inode6->size = 100;
+
+	int result = ht_evict_inode(hashtable, 1, inode6);
+  	printf("result: %d \n", inode6->size);
+
+	// int i =  ht_get_inode( hashtable, 1, inode6);
+	//  printf( "\ntest ht get %d\n", i);
+	//  printf( "%d\n", inode6->size);
+
+	// printf("reach 3.");
+	// while(hashtable->lru_head != NULL)
+	// {
+	// 	printf("\nkey in lru list: %d \n", hashtable->lru_head->key);
+	// 	hashtable->lru_head = hashtable->lru_head->lru_next;
+	// }
+	// printf("reach 4.");
+
+//=================== The above is testing inode cache and its lru list.========================
+//=================== The next is testing block cache and its lru list. ========================
+
+	// hashtable_b *ht = ht_create_block( 3);
+ // 	b_node * i1 = (b_node *)malloc(sizeof(b_node));
+ // 	strncpy(i1->data, "1abcdefg 2abcedfg 3abcdefg 4abcedfg 5abcdefg 6abcedfg 7abcdefg 8abcedfg 9abcdefg 0abcedfg ", BLOCKSIZE);
+ // 	printf("i1->data %s \n", i1->data);
+
+ // 	b_node * i2 = (b_node *)malloc(sizeof(b_node));
+ // 	i2->tag = DIRTY;
+ // 	b_node * i3 = (b_node *)malloc(sizeof(b_node));
+ // 	i3->tag = DIRTY;
+ // 	b_node * i4 = (b_node *)malloc(sizeof(b_node));
+ // 	i4->tag = DIRTY;
+ // 	b_node * i5 = (b_node *)malloc(sizeof(b_node));
+ // 	i5->tag = DIRTY;
+
+ // 	b_node * i6 = (b_node *)malloc(sizeof(b_node));
+ // 	i6->tag = 100;
+
+ // 	ht_set_block(ht, 1, i1->data);
+ // 	ht_set_block(ht, 1, i1->data);
+ // 	ht_set_block(ht, 3, i1->data);
+ // 	// ht_set_block(ht, 4, i1->data);
+ // 	// ht_set_block(ht, 3, i1->data);
+ // 	// ht_set_block(ht, 5, i1->data);
+ // 	// ht_set_block(ht, 4, i1->data);
+ // 	// ht_set_block(ht, 1000, i1->data);
+
+ // 	int result = ht_evict_block(ht, 1, i6);
+ // 	printf("result: %s \n", i6->data);
+
+ // 	while(ht->lru_head != NULL)
+	// {
+	// 	printf("\nkey in lru list: %d \n", ht->lru_head->key);
+	// 	ht->lru_head = ht->lru_head->lru_next;
+	// }
+	// printf("reach 4.");
+
+
+
+	return 0;
+} //test methods for blcok cache
+ 
+ 	
+
+
+ 
+
+
