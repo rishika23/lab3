@@ -1,0 +1,128 @@
+This directory contains the following files:
+	-yfs.c
+	 contains 
+		-Kernelstart where page tables are set up ,virtual memory is enabled and init and idle processes are loaded into the memory.
+		-procedures for all the defined yalnix calls and handlers for all traps, interrupts and exceptions.
+	-iolib.c
+	 contains
+	 	- All the procedures required in handout througth which user processors can access to yfs file system server.
+	-hash.c
+	 contains
+	 	- The method to create a hashtable which will be used as a cache in our yfs file system.
+	 	- ht_set method to put new pairs in hashtable.
+	 	- ht_get method to get new pairs from hashtable.
+	 	- LRU policy: when the cache is full, we evict pairs from hashtable based on LRU policy.
+	-test programs
+		contains all the test programs which are provided by the professor and are supported by our kernel.
+	-makefile
+		contains all the code to compile and link yfs.c, iolib.c, hash.c and other test programs
+
+To run the yalnix file give the following command:
+	/clear/courses/comp421/pub/bin/yalnix yfs testcase
+	
+	where testcase is the testcase's name by which you want to test yfs file system. 
+	All the other processes which need to be run must be compiled in Makefile.
+	
+Project Members:
+	Rishika Gupta 	-rg31
+	Yijie Li 		-yl68
+
+Our project supports all the test cases included in our submitted file.
+
+Following is the structure we defined for the communication between iolib.a and yfs.c:
+
+/* General data struct used to create messages between iolib.a and yfs.c */
+struct my_msg{
+       int type;       // 1 by default when leaving iolib; after returning from server, if success, 0; otherwise -1;
+       int data2;      // Used to get/send inode number
+       char data3[16]; // Used to format the message into 32 bytes.
+       void *ptr;      // Generally, it's pathname; In special cases, it's a pointer of a struct specifically defined for some method.
+};
+
+/* Specifically in Read and Write. Will be passed between iolib and server by void *prt in my_msg. */
+struct read_struct
+{	
+	int offset;        // Current position in this file.
+	int len;           // The actual number of chars being read or writen.
+	void *buff;        // The address to begin read or write.
+	char str[16];      // Not used. Redundanct design.
+};
+
+/* Specifically used for Stat method. Will be passed between iolib and server by void *prt in my_msg.*/
+struct stat_struct
+{
+	struct stat_struct * statbuf;  // Contains the infomation of one file. It is provided.
+	char pathname[MAXPATHNAMELEN]; // Pathname of the file.
+};
+
+/* Specifically used for Link and SymLink. Will be passed between iolib and server by void *prt in my_msg.*/
+struct old_new
+{
+	char oldname[MAXPATHNAMELEN];  // New file's name
+	char newname[MAXPATHNAMELEN];  // Old file's name
+};
+
+/* Specifically used for ReadLink. Will be passed between iolib and server by void *prt in my_msg.*/
+struct readlink
+{
+	char pathname[MAXPATHNAMELEN];  // File's pathname
+	char *buf;                      // The begining of the buffer.
+	int len;                        // Maximum number of characters.
+
+};
+
+Following is the structures we are using in hash.c:
+
+/* Tag of each block in cache.*/
+#define DIRTY 0
+#define CLEAN 1
+
+ /* the node in inode cache */
+struct entry_s {
+	int tag;                    // 0 dirty; 1 clean
+	int key;                    // inode number
+	struct inode value;         // the value of inode
+	struct entry_s *next;       // next node in hashtable
+	struct entry_s *lru_next;   // next node in LRU list.
+};
+typedef struct entry_s entry_t;
+
+/* the node in block cache */
+struct _b_node {
+	int tag;                     // 0 dirty; 1 clean
+	int key;                     // block number
+	char data[BLOCKSIZE];        // BLOCKSIZE defined in filesystem.h
+	struct _b_node *next;        // next node in hashtable
+	struct _b_node *lru_next;    // next node in LRU list
+};
+typedef struct _b_node b_node;
+
+/* Hashtable bucket for inode cache. */
+struct hashtable_s {
+	int size;                     // size of the cache
+	int counter;                  // Tell if the hash table is full.
+	entry_t **table;			  // Pointer of the table.
+	entry_t *lru_head;            // each hashtable has a LRU list so that when hastable is full, evicting some pair based on LRU policy.
+}; 
+typedef struct hashtable_s hashtable_t;
+
+/* Hashtable bucket for block cache.*/
+struct _hashtable_b 
+{
+	int size; 					// size of the cacahe
+	int counter; 				// tell if the cache is full
+	b_node **table;				// table itself
+	b_node *lru_head;           // each hashtable has a LRU list so that when hastable is full, evicting some pair based on LRU policy.
+};
+typedef struct _hashtable_b hashtable_b;
+
+Following is the methods we provided for yfs.c:
+
+extern hashtable_t *ht_create_inode( int size ); //create hashtable of inode cacahe;
+extern hashtable_b *ht_create_block( int size ); // create hashtable of block cache.
+
+extern int ht_set_inode( hashtable_t *hashtable, int key, struct inode *value ); // if success, return 0.
+extern int ht_set_block( hashtable_b *hashtable, int key, char* data ); //if success, return 0. as including evicting, so it always success.
+
+extern int ht_get_inode( hashtable_t *hashtable, int key, struct inode * pointer); // if success, return 0; if not exist, return -1.
+extern int ht_get_block( hashtable_b *hashtable, int key, char * pointer) ; // if success, return0; if not exists, return -1.
