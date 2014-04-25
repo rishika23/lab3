@@ -1,0 +1,72 @@
+/*
+ *  External definitions for the Yalnix File System user interface
+ */
+
+#ifndef _hash_h
+#define _hash_h
+
+#include <sys/types.h>
+#include <comp421/hardware.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Tag of each block in cache.*/
+#define DIRTY 0
+#define CLEAN 1
+ 
+ /* the node in inode cache */
+struct entry_s {
+	int tag;                    // 0 dirty; 1 clean
+	int key;                    // inode number
+	struct inode value;         // the value of inode
+	struct entry_s *next;       // next node in hashtable
+	struct entry_s *lru_next;   // next node in LRU list
+};
+typedef struct entry_s entry_t;
+
+/* the node in block cache */
+struct _b_node {
+	int tag;                    // 0 dirty; 1 clean
+	int key;                    // block number
+	char data[BLOCKSIZE];       // BLOCKSIZE defined in filesystem.h
+	struct _b_node *next;       // next node in hashtable
+	struct _b_node *lru_next;   // next node in LRU list
+};
+typedef struct _b_node b_node;
+
+/* Hashtable bucket for inode cache. */
+struct hashtable_s {
+	int size; 				 	// size of the cache
+	int counter; 				// tell if the hash table is full.
+	entry_t **table;			// table itself
+	entry_t *lru_head;          // each hashtable has a LRU list so that when hastable is full, evicting some pair based on LRU policy.
+}; 
+typedef struct hashtable_s hashtable_t;
+
+/* Hashtable bucket for block cache.*/
+struct _hashtable_b 
+{
+	int size; 					// size of the cacahe
+	int counter; 				// tell if the cache is full
+	b_node **table;				// table itself
+	b_node *lru_head;           // each hashtable has a LRU list so that when hastable is full, evicting some pair based on LRU policy.
+};
+typedef struct _hashtable_b hashtable_b;
+
+/* Declare functions. */
+extern hashtable_t *ht_create_inode( int size ); //create hashtable of inode cacahe;
+extern hashtable_b *ht_create_block( int size ); // create hashtable of block cache.
+
+extern int ht_set_inode( hashtable_t *hashtable, int key, struct inode *value ); // if success, return 0.
+extern int ht_set_block( hashtable_b *hashtable, int key, char* data ); //if success, return 0. as including evicting, so it always success.
+
+extern int ht_get_inode( hashtable_t *hashtable, int key, struct inode * pointer); // if success, return 0; if not exist, return -1.
+extern int ht_get_block( hashtable_b *hashtable, int key, char * pointer) ; // if success, return0; if not exists, return -1.
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _iolib_h */
