@@ -1,0 +1,37 @@
+extern int Link(char *oldname, char *newname)
+{
+	if(oldname==NULL||newname==NULL)
+		return ERROR;
+	printf("\nReached in Link");
+	if(strlen(oldname) > (MAXPATHNAMELEN-1) || strlen(newname) > (MAXPATHNAMELEN-1))
+		return ERROR;
+
+	struct old_new *name;
+	name = (struct old_new *)malloc(sizeof(struct old_new));
+
+	memcpy(name->oldname, oldname, strlen(oldname)+1);
+	memcpy(name->newname, newname, strlen(newname)+1);
+
+	/* Process multiple slashes first */
+	reduce_slash(name->newname);
+	reduce_slash(name->oldname);
+
+	/* Create msg to be sent to server.*/
+	struct my_msg *msg_link;
+	msg_link = (struct my_msg *)malloc(sizeof(struct my_msg));
+
+	msg_link->type = LINK;
+	msg_link->data2 = current_inode_num;
+	msg_link->ptr = name;
+	printf("\nReached in Link before send");
+	Send((void *)msg_link, -FILE_SERVER);
+	int result=msg_link->type;
+	if(result==ERROR)
+	{
+		TtyPrintf(0,"\nLink Unsuccessful!");
+	}
+	free(name);
+	free(msg_link);
+
+	return result;
+}
